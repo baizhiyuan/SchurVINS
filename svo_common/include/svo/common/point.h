@@ -39,14 +39,18 @@ private:
 
 struct KeypointIdentifier
 {
-  FrameWeakPtr frame;
-  int frame_id;
-  size_t keypoint_index_;
+  FrameWeakPtr frame;       // 使用弱指针（weak_ptr）来指向关键点所属的帧，避免循环引用
+  int frame_id;             // 当前帧的 ID，用于唯一标识帧
+  size_t keypoint_index_;   // 关键点在帧中的索引位置
+  // 构造函数，通过传入一个指向帧的共享指针 (FramePtr) 以及关键点在帧中的索引来构造 KeypointIdentifier 对象
   KeypointIdentifier(const FramePtr& _frame, const size_t _feature_index);
 
+  // 重载 == 运算符：用于比较两个 KeypointIdentifier 对象是否相等
+  // 首先使用 frame.lock() 将弱指针 frame 转换为共享指针，确保指向的帧仍然有效
   inline bool operator ==(const KeypointIdentifier& other) const
   {
-    CHECK(frame.lock() && other.frame.lock());
+    CHECK(frame.lock() && other.frame.lock());  // 用于确保两个对象都指向有效的帧
+    // 具体比较条件包括：frame 是否指向相同的帧；frame_id 是否相同；keypoint_index_ 是否相同
     return frame.lock().get() == other.frame.lock().get() &&
         frame_id == other.frame_id && keypoint_index_ == other.keypoint_index_;
   }

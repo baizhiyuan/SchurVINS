@@ -49,9 +49,9 @@ struct SparseImgAlignOptions
 struct SparseImgAlignState
 {
   EIGEN_MAKE_ALIGNED_OPERATOR_NEW
-  Transformation T_icur_iref;     ///< Relative transformation between last and current frame
-  double alpha = 0.0;  ///< Affine illumination model multiplicative parameter
-  double beta = 0.0;   ///< Affine illumination model additive parameter
+  Transformation T_icur_iref;     ///< 上一帧和当前帧之间的相对变换
+  double alpha = 0.0;  ///< 仿射光照模型乘性参数
+  double beta = 0.0;   ///< 仿射光照模型附加参数
   // TODO: if we have multiple frames, we should have alpha&beta for every frame individually
 };
 

@@ -764,6 +764,8 @@ size_t FrameHandlerBase::projectMapInFrame()
     std::vector<std::future<void>> reprojector_workers;
     for (size_t camera_idx = 0; camera_idx < cams_->numCameras(); ++camera_idx)
     {
+      // std::bind：将一个函数与特定的一组参数绑定在一起。结果是一个可调用对象，可以像调用普通函数那样调用它
+      // 创建了一个绑定后的 reprojectFrames 函数对象。这个对象可以被传递给其他函数，也可以用于异步调用，如通过 std::async
       auto func = std::bind(&Reprojector::reprojectFrames, reprojectors_.at(camera_idx).get(),
                             new_frames_->at(camera_idx), overlap_kfs_.at(camera_idx), trash_points.at(camera_idx));
       reprojector_workers.push_back(std::async(std::launch::async, func));
@@ -938,16 +940,23 @@ void FrameHandlerBase::optimizeStructure(const FrameBundle::Ptr& frames, int max
 }
 
 //------------------------------------------------------------------------------
+// 目的是将当前帧中的种子点（Seeds）升级为三维空间中的特征点（Features）。
+// 种子点最初只是二维图像中的潜在特征，通过特定的深度估计方法来逐渐获取它们的三维信息。
+// 一旦种子点的深度估计收敛，便可以将它们升级为三维点以进一步参与地图的构建和特征跟踪。
 void FrameHandlerBase::upgradeSeedsToFeatures(const FramePtr& frame)
 {
   VLOG(40) << "Upgrade seeds to features";
-  size_t update_count = 0;
-  size_t unconverged_cnt = 0;
+  size_t update_count = 0;    // 记录升级为特征点的种子数量
+  size_t unconverged_cnt = 0; // 记录未收敛的种子数量
+  // 遍历当前帧中的所有特征点
   for (size_t i = 0; i < frame->num_features_; ++i)
   {
+    // 如果特征点已经有对应的地标
     if (frame->landmark_vec_[i])
     {
       const FeatureType& type = frame->type_vec_[i];
+      // 检查特征点的类型 (type) 是否为 kCorner, kEdgelet 或 kMapPoint
+      // 如果是，则将当前帧作为新的观测加到地标 (landmark) 的观测列表中
       if (type == FeatureType::kCorner || type == FeatureType::kEdgelet ||
           type == FeatureType::kMapPoint)
       {
@@ -955,27 +964,36 @@ void FrameHandlerBase::upgradeSeedsToFeatures(const FramePtr& frame)
       }
       else
       {
+        // 如果特征点是固定地标，也将当前帧作为观测添加到地标中
         CHECK(isFixedLandmark(type));
         frame->landmark_vec_[i]->addObservation(frame, i);
       }
     }
+    // 如果特征点没有地标但有种子引用
     else if (frame->seed_ref_vec_[i].keyframe)
     {
-      if (isUnconvergedSeed(frame->type_vec_[i]))
+      // 如果特征点没有对应的地标，但有一个种子引用，意味着该特征点还处于深度估计阶段
+      if (isUnconvergedSeed(frame->type_vec_[i])) 
       {
+        // 如果种子点未收敛，则增加未收敛种子的计数
         unconverged_cnt++;
       }
+      // 获取种子引用，它包含了关于该种子的信息，包括参考关键帧和种子的 ID
       SeedRef& ref = frame->seed_ref_vec_[i];
 
+      // 为种子点创建三维地标点
       // In multi-camera case, it might be that we already created a 3d-point
       // for this seed previously when processing another frame from the bundle.
       PointPtr point = ref.keyframe->landmark_vec_[ref.seed_id];
+      // 首先检查是否已经为该种子点创建了三维地标
       if (point == nullptr)
       {
         // That's not the case. Therefore, create a new 3d point.
+        // 使用参考关键帧的位姿转换将种子点的坐标从相机坐标系转换到世界坐标系
         Position xyz_world =
             ref.keyframe->T_world_cam() *
             ref.keyframe->getSeedPosInFrame(ref.seed_id);
+        // 创建一个新的三维地标点
         point = std::make_shared < Point > (xyz_world);
         ref.keyframe->landmark_vec_[ref.seed_id] = point;
         ref.keyframe->track_id_vec_[ref.seed_id] = point->id();
@@ -983,6 +1001,7 @@ void FrameHandlerBase::upgradeSeedsToFeatures(const FramePtr& frame)
       }
 
       // add reference to current frame.
+      // 将地标点引用添加到当前帧并更新特征类型
       frame->landmark_vec_[i] = point;
       frame->track_id_vec_[i] = point->id();
       point->addObservation(frame, i);
@@ -998,6 +1017,7 @@ void FrameHandlerBase::upgradeSeedsToFeatures(const FramePtr& frame)
       }
       else if (isEdgelet(ref.keyframe->type_vec_[ref.seed_id]))
       {
+        // 如果特征点是 kEdgelet，则使用直方图计算其方向，并更新其梯度方向 (grad_vec_)
         ref.keyframe->type_vec_[ref.seed_id] = FeatureType::kEdgelet;
         frame->type_vec_[i] = FeatureType::kEdgelet;
 
@@ -1104,18 +1124,23 @@ void FrameHandlerBase::setRecovery(const bool recovery)
 void FrameHandlerBase::setTrackingQuality(const size_t num_observations)
 {
   tracking_quality_ = TrackingQuality::kGood;
+  // 如果当前帧中的有效特征点数量 num_observations 少于设定的最小特征点数量阈值
+  // 则跟踪质量被标记为不足
   if (num_observations < options_.quality_min_fts)
   {
+    // 以 0.5 秒的间隔打印警告信息，提示当前帧的特征点数量低于要求, 避免了过多的警告输出
     SVO_WARN_STREAM_THROTTLE(0.5, "Tracking less than "
                              << options_.quality_min_fts <<" features!");
     tracking_quality_ = TrackingQuality::kInsufficient;
   }
+  // 与上一帧相比，丢失的特征点数量
   const int feature_drop = static_cast<int>(num_obs_last_) - num_observations;
   // seeds are extracted at keyframe,
   // so the number is not indicative of tracking quality
   if (!last_frames_->isKeyframe() &&
       feature_drop > options_.quality_max_fts_drop)
   {
+    // 如果当前帧不是关键帧, 且丢失的特征点数量超过了设定的最大特征点丢失阈值, 则跟踪质量也被标记为不足
     // SVO_WARN_STREAM("Lost "<< feature_drop <<" features!");
     tracking_quality_ = TrackingQuality::kInsufficient;
   }

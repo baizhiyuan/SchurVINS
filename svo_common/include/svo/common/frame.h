@@ -198,6 +198,7 @@ public:
   /// Number of landmark references in frames.
   inline size_t numLandmarksInBA() const {
     return static_cast<size_t>(
+          // 返回范围 [first, last) 中满足特定判别标准的元素数
           std::count_if(landmark_vec_.begin(), landmark_vec_.end(),
                         [](const PointPtr& p)
     { return p != nullptr && p->in_ba_graph_; }));

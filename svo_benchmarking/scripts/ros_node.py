@@ -44,7 +44,7 @@ class RosNode:
                     key+':='+str(parameter_dictionary[key])
 
     def add_flags(self, flag_dictionary):
-        for key, value in flag_dictionary.iteritems():
+        for key, value in flag_dictionary.items():
             self._param_string += ' --'+key+'='+str(value)
 
     def clear_all_parameters(self):

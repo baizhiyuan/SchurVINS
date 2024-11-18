@@ -228,9 +228,9 @@ extern const std::unordered_map<svo::Stage, std::string, EnumClassHash>
 kStageName;
 
 enum class TrackingQuality {
-  kInsufficient,
+  kInsufficient,  // 表示跟踪状况不佳，可能是由于特征点不足或者特征点的丢失过多导致
   kBad,
-  kGood
+  kGood           // 表示当前跟踪状况良好，特征点数量足够，且丢失量在可接受范围内
 };
 extern const std::unordered_map<svo::TrackingQuality, std::string,
 EnumClassHash>  kTrackingQualityName;

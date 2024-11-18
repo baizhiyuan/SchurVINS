@@ -205,47 +205,56 @@ settings:
 ##### List of Datasets #####
 ############################
 datasets:
-  - name: euroc/stereo/MH_01
-    settings:
-      dataset_first_frame: 0
-      dataset_last_frame: 3660
-  - name: euroc/stereo/MH_02
-    settings:
-      dataset_first_frame: 0
-      dataset_last_frame: 3015
-  - name: euroc/stereo/MH_03
-    settings:
-      dataset_first_frame: 300
-      dataset_last_frame: 2645
-  - name: euroc/stereo/MH_04
-    settings:
-      dataset_first_frame: 340
-      dataset_last_frame: 1985
-  - name: euroc/stereo/MH_05
-    settings:
-      dataset_first_frame: 350
-      dataset_last_frame: 2245
-  - name: euroc/stereo/V1_01
-    settings:
-      dataset_first_frame: 0
-      dataset_last_frame: 2860
-  - name: euroc/stereo/V1_02
-    settings:
-      dataset_first_frame: 0
-      dataset_last_frame: 1685
   - name: euroc/stereo/V1_03
     settings:
-      dataset_first_frame: 0
+      dataset_first_frame: 500
       dataset_last_frame: 2050
-  - name: euroc/stereo/V2_01
-    settings:
-      dataset_first_frame: 0
-      dataset_last_frame: 2190
-  - name: euroc/stereo/V2_02
-    settings:
-      dataset_first_frame: 100
-      dataset_last_frame: 2290
-  - name: euroc/stereo/V2_03
-    settings:
-      dataset_first_frame: 0
-      dataset_last_frame: 1875
+  # - name: euroc/stereo/MH_01
+  #   settings:
+  #     dataset_first_frame: 500
+  #     dataset_last_frame: 3660
+# datasets:
+#   - name: euroc/stereo/MH_01
+#     settings:
+#       dataset_first_frame: 0
+#       dataset_last_frame: 3660
+#   - name: euroc/stereo/MH_02
+#     settings:
+#       dataset_first_frame: 0
+#       dataset_last_frame: 3015
+#   - name: euroc/stereo/MH_03
+#     settings:
+#       dataset_first_frame: 300
+#       dataset_last_frame: 2645
+#   - name: euroc/stereo/MH_04
+#     settings:
+#       dataset_first_frame: 340
+#       dataset_last_frame: 1985
+#   - name: euroc/stereo/MH_05
+#     settings:
+#       dataset_first_frame: 350
+#       dataset_last_frame: 2245
+#   - name: euroc/stereo/V1_01
+#     settings:
+#       dataset_first_frame: 0
+#       dataset_last_frame: 2860
+#   - name: euroc/stereo/V1_02
+#     settings:
+#       dataset_first_frame: 0
+#       dataset_last_frame: 1685
+#   - name: euroc/stereo/V1_03
+#     settings:
+#       dataset_first_frame: 0
+#       dataset_last_frame: 2050
+#   - name: euroc/stereo/V2_01
+#     settings:
+#       dataset_first_frame: 0
+#       dataset_last_frame: 2190
+#   - name: euroc/stereo/V2_02
+#     settings:
+#       dataset_first_frame: 100
+#       dataset_last_frame: 2290
+#   - name: euroc/stereo/V2_03
+#     settings:
+#       dataset_first_frame: 0
+#       dataset_last_frame: 1875

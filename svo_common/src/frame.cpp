@@ -168,30 +168,39 @@ FeatureWrapper Frame::getEmptyFeatureWrapper()
   return getFeatureWrapper(num_features_);
 }
 
+// 遍历所有特征点，跳过无效或离群点。
+// 根据特征点相对于图像中心的距离，选择离中心最近的特征点作为中心关键点。
+// 对于图像的四个象限，选择尽可能远离中心的点作为角落关键点，以增加特征点的空间分布。
 void Frame::setKeyPoints()
 {
+  // 计算图像的中心坐标
   const FloatType cu = cam_->imageWidth()/2;
   const FloatType cv = cam_->imageHeight()/2;
 
+  // 遍历所有特征点，num_features_ 表示特征点的数量
   for(size_t i = 0; i < num_features_; ++i)
   {
+    // 如果特征点没有对应的地标，则跳过这个点；如果特征点被标记为离群点(kOutlier)，也跳过该点
     if(landmark_vec_[i] == nullptr || type_vec_[i] == FeatureType::kOutlier)
       continue;
 
+    // 获取特征点的像素坐标
     const FloatType& u = px_vec_(0,i);
     const FloatType& v = px_vec_(1,i);
 
+    // 选择图像中心附近的关键点
     // center
-    if(key_pts_[0].first == -1)
+    // key_pts_[0] 用于存储离图像中心最近的关键点
+    if(key_pts_[0].first == -1)   // 意味着还没有选定中心点，则将当前特征点设为中心关键点
       key_pts_[0] = std::make_pair(i, landmark_vec_[i]->pos_);
-
-    else if(std::max(std::fabs(u-cu), std::fabs(v-cv))
+    // 如果已经有中心关键点，则计算当前特征点与图像中心的距离，并将距离较近的特征点设为新的中心关键点
+    else if(std::max(std::fabs(u-cu), std::fabs(v-cv)) // 计算特征点与中心的最大距离，并比较现有关键点和当前特征点的距离
             < std::max(std::fabs(px_vec_(0, key_pts_[0].first) - cu),
                        std::fabs(px_vec_(1, key_pts_[0].first) - cv)))
       key_pts_[0] = std::make_pair(i, landmark_vec_[i]->pos_);
 
-    // corner
-    if(u >= cu && v >= cv)
+    // corner 选择角落附近的关键点
+    if(u >= cu && v >= cv)  // 右下角象限
     {
       if(key_pts_[1].first == -1)
         key_pts_[1] = std::make_pair(i, landmark_vec_[i]->pos_);
@@ -199,7 +208,7 @@ void Frame::setKeyPoints()
               > (px_vec_(0, key_pts_[1].first) - cu) * (px_vec_(1, key_pts_[1].first)-cv))
         key_pts_[1] = std::make_pair(i, landmark_vec_[i]->pos_);
     }
-    if(u >= cu && v < cv)
+    if(u >= cu && v < cv)   // 右上角象限
     {
       if(key_pts_[2].first == -1)
         key_pts_[2] = std::make_pair(i, landmark_vec_[i]->pos_);
@@ -207,7 +216,7 @@ void Frame::setKeyPoints()
               > (px_vec_(0, key_pts_[2].first) - cu) * (px_vec_(1, key_pts_[2].first)-cv))
         key_pts_[2] = std::make_pair(i, landmark_vec_[i]->pos_);
     }
-    if(u < cv && v < cv)
+    if(u < cv && v < cv)    // 左上角象限
     {
       if(key_pts_[3].first == -1)
         key_pts_[3] = std::make_pair(i, landmark_vec_[i]->pos_);
@@ -215,7 +224,7 @@ void Frame::setKeyPoints()
               > (px_vec_(0, key_pts_[3].first) - cu) * (px_vec_(1, key_pts_[3].first)-cv))
         key_pts_[3] = std::make_pair(i, landmark_vec_[i]->pos_);
     }
-    if(u < cv && v >= cv)
+    if(u < cv && v >= cv)   // 左下角象限
     {
       if(key_pts_[4].first == -1)
         key_pts_[4] = std::make_pair(i, landmark_vec_[i]->pos_);
@@ -388,16 +397,22 @@ void createImgPyramid(const cv::Mat& img_level_0, int n_levels, ImgPyr& pyr)
 bool getSceneDepth(const FramePtr& frame, double& depth_median, double& depth_min, double& depth_max)
 {
   std::vector<double> depth_vec;
-  depth_vec.reserve(frame->num_features_);
+  // 如果特征的数量大于 vector 的容量(capacity)，则进行扩容；反之不会重新分配 vector 的存储空间
+  // 好处：避免push_back重新分配内存
+  depth_vec.reserve(frame->num_features_); 
+  // 返回该类型的最大值 <double>: 1.79769e+308 or 0x1.fffffffffffffp+1023
+  // 提前定义最大最小值的目的是限定数值区间，避免溢出
   depth_min = std::numeric_limits<double>::max();
   depth_max = 0;
   double depth = 0;
   const Position ref_pos = frame->pos();
+  // 遍历帧中的所有特征点
   for(size_t i = 0; i < frame->num_features_; ++i)
   {
+    // 当前帧有地标则直接计算深度，没有则用关键帧计算
     if(frame->landmark_vec_[i])
     {
-      depth = (frame->T_cam_world()*frame->landmark_vec_[i]->pos_).norm();
+      depth = (frame->T_cam_world() * frame->landmark_vec_[i]->pos_).norm();
     }
     else if(frame->seed_ref_vec_[i].keyframe)
     {
@@ -412,11 +427,13 @@ bool getSceneDepth(const FramePtr& frame, double& depth_median, double& depth_mi
     }
 
     depth_vec.push_back(depth);
+    // 更新最小深度 depth_min 和最大深度 depth_max
     depth_min = std::min(depth, depth_min);
     depth_max = std::max(depth, depth_max);
   }
   if(depth_vec.empty())
   {
+    // 处理深度向量为空的情况
     SVO_WARN_STREAM("Cannot set scene depth. Frame has no point-observations!");
     return false;
   }

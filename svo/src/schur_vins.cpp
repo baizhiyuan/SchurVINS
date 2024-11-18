@@ -198,6 +198,7 @@ void SchurVINS::Prediction(double _dt, const Eigen::Vector3d& _acc, const Eigen:
         cov.block(0, 15, 15, cov_len - 15) = Phi * cov.block(0, 15, 15, cov_len - 15);
         cov.block(15, 0, cov_len - 15, 15) = cov.block(15, 0, cov_len - 15, 15) * Phi.transpose();
     }
+    // 为了确保协方差矩阵的对称，避免非对称协方差带来的数值不稳定问题，尤其是对协方差进行分解的操作
     Eigen::MatrixXd stable_cov = (cov + cov.transpose()) / 2.0;
     cov = stable_cov;
 
@@ -210,21 +211,31 @@ void SchurVINS::Prediction(double _dt, const Eigen::Vector3d& _acc, const Eigen:
     curr_state->gyr = gyr;
 }
 
+// 构建舒尔补系统：利用地图点与状态之间的关系，构建舒尔补线性系统，减少优化的维度。
+// 计算残差和雅可比：对地图点的观测，计算残差和雅可比矩阵，用于后续的优化。
+// 使用 Huber 损失：对较大的误差应用 Huber 损失，减少离群点对整体优化的影响。
+// 状态更新：利用舒尔补线性系统来更新状态，包括相机的位姿和地图点的位置
 void SchurVINS::Solve3() {
     const int state_size = (int)states_map.size();
     if (state_size < 2) {
+        // 只有一帧时，没啥好优化的，直接返回
         LOG(INFO) << "only one window, bypass solve()";
         return;
     }
-
+    // 初始化相关索引和矩阵
+    // min_frame_idx 和 max_frame_idx表示滑动窗口中最小和最大的帧索引，用于确定需要进行优化的帧的范围
     const int min_frame_idx = states_map.begin()->second->frame_bundle->getBundleId();
     const int prev_frame_id0 = (++states_map.rbegin())->second->frame_bundle->frames_[0]->id(),
               prev_frame_id1 = (++states_map.rbegin())->second->frame_bundle->frames_[1]->id();
     const int max_frame_idx = states_map.rbegin()->second->frame_bundle->getBundleId();
 
+    // 表示状态矩阵的维度，每个状态有 6 个自由度
     const int state_len = state_size * 6;
     const int64_t curr_state_id = curr_state->id;
+    // 初始化优化矩阵 Amtx 和向量 Bvct
+    // 雅可比矩阵与权重矩阵相乘后的结果，用于优化问题的二次项
     Eigen::MatrixXd Amtx = Eigen::MatrixXd::Zero(state_len, state_len);
+    // 右侧向量，表示目标值与预测值的残差部分
     Eigen::VectorXd Bvct = Eigen::VectorXd::Zero(state_len);
     Matrix2o3d dr_dpc = Matrix2o3d::Zero();
     Matrix3o6d dpc_dpos = Matrix3o6d::Zero();
@@ -233,18 +244,22 @@ void SchurVINS::Solve3() {
     Eigen::Vector2d r = Eigen::Vector2d::Zero();
 
     // compute local points jacobian
+    // 计算局部地图点的雅可比矩阵
     int num_obs = 0;
     double total_error = 0.0;
     schur_pts_.clear();
+    // 遍历所有的局部地图点 local_pts，并对每个点初始化相关变量
     for (svo::LocalPointMap::iterator pit = local_pts.begin(); pit != local_pts.end(); ++pit) {
         const svo::PointPtr& curr_pt = pit->second;
+        // // 如果点尚未注册到当前状态
         if (curr_pt->register_id_ != curr_state_id) {  // init point jacobian
             curr_pt->gv.setZero();
             curr_pt->V.setZero();
             curr_pt->W.setZero();
+            // 标记该地图点已经注册到当前状态，用于避免重复初始化
             curr_pt->register_id_ = curr_state_id;  // avoid init multi times
         }
-
+        // 对每个地图点，首先检查它的状态（如是否有效），如果不满足要求，则跳过该点
         if (curr_pt->CheckStatus() == false || curr_pt->CheckLocalStatus() == false
             || curr_pt->CheckLocalStatus(prev_frame_id0, prev_frame_id1, max_frame_idx) == false) {
             // LOG(INFO) << "Solve2 pass invalid point: " << curr_pt->id()
@@ -252,23 +267,25 @@ void SchurVINS::Solve3() {
             //           curr_pt->pos().transpose();
             continue;
         }
-
+        // 保存需要参与舒尔补计算的地图点
         schur_pts_.insert(curr_pt);
         const Eigen::Vector3d& Pw = curr_pt->pos();
 
         // compute frame local observation
+        // 计算特征观测的残差和雅可比矩阵，对每个地图点，遍历其所有特征观测
         for (svo::LocalFeatureMap::iterator fit = curr_pt->local_obs_.begin(); fit != curr_pt->local_obs_.end();
              ++fit) {
             const svo::LocalFeaturePtr& feature = fit->second;
             const int curr_frame_idx = feature->frame->bundleId();
-
+            // 检查该观测是否在滑动窗口内，
             if (curr_frame_idx < min_frame_idx
                 || curr_frame_idx > max_frame_idx)  // pass observations on schurvins local sliding window
                 continue;
-
+            // 检查其状态指针是否有效（使用 expired() 方法）
             if (feature->state.expired())
                 continue;
 
+            // 使用 state.lock() 来获得指向有效状态的共享指针
             const svo::AugStatePtr& ft_state = feature->state.lock();
             const int& state_idx = ft_state->index;
             const svo::Transformation& T_imu_cam = feature->camera_id == 0 ? T_imu_cam0 : T_imu_cam1;
@@ -282,17 +299,23 @@ void SchurVINS::Solve3() {
             const double level_scale = 1;
 
             // calc residual
+            // 残差表示地图点在当前帧中的投影位置与实际观测位置之间的差距
             if (svo::LocalFeature::unit_sphere) {
+                // 如果地图点位于单位球面（unit_sphere），则使用单位化的 Pc 计算
                 r = feature->tan_space * (feature->xyz - Pc.normalized()) * (focal_length / level_scale);
             } else {
+                // 否则，使用齐次坐标表示的方法计算投影误差（即将 Pc 的前两维除以其深度 Pc.z()）
                 r = (feature->xyz.head<2>() - Pc.head<2>() / Pc.z()) * (focal_length / level_scale);
             }
             total_error += r.norm();
             // LOG(INFO) << "kf residual: " << r.transpose();
 
-            // huber
+            // huber：目的是使得优化对离群点（如误匹配的特征点）具有鲁棒性，减少它们对最终位姿估计的负面影响
+            // 应用 Huber 损失函数
             const double r_l2 = r.squaredNorm();
             double huber_scale = 1.0;
+            // 对残差较大的特征点施加 Huber 损失，减少其对整体优化的影响
+            // 当残差平方大于设定阈值 huberB 时，计算一个缩放因子 huber_scale，使得误差的影响减小
             if (r_l2 > huberB) {
                 const double radius = sqrt(r_l2);
                 double rho1 = std::max(std::numeric_limits<double>::min(), huberA / radius);
@@ -373,7 +396,9 @@ void SchurVINS::Solve3() {
     }
 
     // schur completment
+    // 通过舒尔补方法消除地图点，降低整个优化问题的维度
     for (const svo::PointPtr& pt : schur_pts_) {
+        // 对每个点的雅可比矩阵 V 求逆，用于消除地图点变量的影响
         pt->Vinv = pt->V.inverse();
         // LOG(INFO) << "pt->V:\n" << pt->V;
         // LOG(INFO) << "pt->Vinv:\n" << pt->Vinv;
@@ -381,6 +406,7 @@ void SchurVINS::Solve3() {
         // LOG(INFO) << "eWVinv:\n" << eWVinv;
         // Amtx.block(0, 0, 6, 6) -= eWVinv * pt->W.transpose();  // ext 2 ext schur
         // Bvct.segment(0, 6) -= eWVinv * pt->gv;                 // ext grad schur
+        // 更新矩阵和向量
         for (svo::StateFactorMap::iterator iti = pt->state_factors.begin(); iti != pt->state_factors.end(); iti++) {
             if (iti->second.state.expired())
                 continue;
@@ -416,6 +442,7 @@ void SchurVINS::Solve3() {
 
     // LOG(INFO) << "Amtx:\n" << Amtx;
     // LOG(INFO) << "Bvct:\n" << Bvct;
+    // 这个步骤相当于解决线性方程 Amtx * Δx = Bvct，计算增量 Δx 并应用到系统中，从而更新相机位姿和地图点的位置
     StateUpdate(Amtx, Bvct);
 
     // LOG(ERROR) << "total local pts: " << local_pts.size() << " schur pts: " << schur_pts_.size();
@@ -433,8 +460,9 @@ void SchurVINS::StateUpdate(const Eigen::MatrixXd& hessian, const Eigen::VectorX
     Eigen::MatrixXd Jacob_compress = Eigen::MatrixXd::Zero(rows, rows + 15);
 
     Jacob_compress.block(0, 15, rows, rows) = hessian;
-
+    // 舒尔补与状态增量求解
     Eigen::MatrixXd S = hessian * cov.bottomRightCorner(rows, rows) * hessian.transpose() + R;
+    // 使用 LDLT 分解求解矩阵方程
     Eigen::MatrixXd K_T = S.ldlt().solve(hessian * cov.bottomRows(rows));
     Eigen::MatrixXd K = K_T.transpose();
     // std::cout << "K: " << S.rows() << " " << S.cols() << " " << hessian.rows() << " " << hessian.cols() << std::endl;
@@ -442,7 +470,7 @@ void SchurVINS::StateUpdate(const Eigen::MatrixXd& hessian, const Eigen::VectorX
     // cov.bottomRows(rows).cols() << std::endl;
 
     // Eigen::MatrixXd K = S.inverse() * hessian * cov.bottomRows(rows);
-
+    // 计算状态增量
     Eigen::VectorXd delta_x = K * gradient;
 
     StateCorrection(K, Jacob_compress, delta_x, R);
@@ -455,18 +483,23 @@ void SchurVINS::StateCorrection(const Eigen::MatrixXd& K, const Eigen::MatrixXd&
     // quat, pos, vel, ba, bg
 
     const Vector15d& dx_imu = dX.head(15);
+    // 通过将状态增量的前三个元素作为小角度近似，生成四元数增量
+    // 使用小角度近似来避免较大的旋转角度引起的不稳定
     const Eigen::Quaterniond dq_imu = Eigen::Quaterniond(1.0, 0.5 * dx_imu[0], 0.5 * dx_imu[1], 0.5 * dx_imu[2]);
     Eigen::Quaterniond new_quat = dq_imu * curr_state->quat;
-    new_quat.normalize();
+    new_quat.normalize();   // 确保其单位化，从而避免数值误差导致的非正交问题
     curr_state->quat = new_quat;
     curr_state->pos += dx_imu.segment<3>(3);
     curr_state->vel += dx_imu.segment<3>(6);
-    curr_state->ba += dx_imu.segment<3>(9);
+    curr_state->ba  += dx_imu.segment<3>(9);
     curr_state->bg += dx_imu.segment<3>(12);
 
+    // 更新滑动窗口中的状态
     int idx = 0;
+    // 遍历 states_map：遍历滑动窗口中的所有状态，并对其进行更新
     for (svo::StateMap::value_type& item : states_map) {
         const Vector6d& dAX = dX.segment<6>(15 + idx);
+        // 生成一个增量四元数, 表示小角度的旋转更新
         Eigen::Quaterniond dq = Eigen::Quaterniond(1.0, 0.5 * dAX[0], 0.5 * dAX[1], 0.5 * dAX[2]);
         dq.normalize();
 
@@ -476,8 +509,10 @@ void SchurVINS::StateCorrection(const Eigen::MatrixXd& K, const Eigen::MatrixXd&
         idx += 6;
     }
 
+    // 更新协方差矩阵
     Eigen::MatrixXd I_KH = Eigen::MatrixXd::Identity(K.rows(), K.rows()) - K * J;
     cov = I_KH * cov;
+    // 确保对称性与稳定性
     Eigen::MatrixXd stable_cov = (cov + cov.transpose()) / 2.0;
     cov = stable_cov;
 }
@@ -668,21 +703,22 @@ void SchurVINS::Forward(const svo::FrameBundle::Ptr frame_bundle) {
     // LOG(WARNING) << "schurvins Forward";
 
     double img_ts = frame_bundle->getMinTimestampSeconds();
+    // 读取 imu 的数据，预测当前系统的状态（加速度、角速度），并更新时间戳
     for (size_t i = 0; i < frame_bundle->imu_datas_.size(); i++) {
         const double tmp_ts = frame_bundle->imu_datas_[i].timestamp_;
         const Eigen::Vector3d tmp_acc = frame_bundle->imu_datas_[i].linear_acceleration_;
         const Eigen::Vector3d tmp_gyr = frame_bundle->imu_datas_[i].angular_velocity_;
-
+        // 如果是第一帧，则初始化赋值
         if (prev_imu_ts < 0) {
             prev_acc = tmp_acc;
             prev_gyr = tmp_gyr;
             prev_imu_ts = tmp_ts;
         }
-
+        // 状态初始化
         if (curr_state->ts < 0) {
             InitState(prev_imu_ts, prev_acc, prev_gyr);
         }
-
+        // 跳过当前帧
         if (tmp_ts < curr_state->ts + EPS) {
             // LOG(WARNING) << std::fixed << "pass imu data: " << tmp_ts;
             continue;
@@ -698,6 +734,7 @@ void SchurVINS::Forward(const svo::FrameBundle::Ptr frame_bundle) {
             prev_gyr = tmp_gyr;
             prev_imu_ts = tmp_ts;
         } else {  // Interpolation img time imu data
+            // 对IMU数据进行时间插值，使得图像时间戳与IMU时间戳之间有一致的数据表示
             double dt_1 = img_ts - curr_state->ts;
             double dt_2 = tmp_ts - img_ts;
             CHECK(dt_1 >= 0) << "dt_1: " << dt_1;
@@ -707,7 +744,7 @@ void SchurVINS::Forward(const svo::FrameBundle::Ptr frame_bundle) {
             double w2 = dt_1 / (dt_1 + dt_2);
 
             Prediction(dt_1, prev_acc, prev_gyr);
-
+            // 使用加权平均的方法在图像时间戳插值获得IMU数据
             prev_acc = w1 * prev_acc + w2 * tmp_acc;
             prev_gyr = w1 * prev_gyr + w2 * tmp_gyr;
             prev_imu_ts = img_ts;
@@ -756,6 +793,7 @@ int SchurVINS::Backward(const svo::FrameBundle::Ptr frame_bundle) {
         }
     }
 
+    // 剔除外点和处理特征点
     int num_valid_feature = 0;
     if (states_map.size() == 1) {
         num_valid_feature = states_map.rbegin()->second->features.size();
@@ -764,6 +802,7 @@ int SchurVINS::Backward(const svo::FrameBundle::Ptr frame_bundle) {
         RemovePointOutliers();                             // remove local point outlier second
     }
 
+    // 输出优化后的状态，qpvb
     {
         Eigen::Quaterniond quat = curr_state->quat;
         Eigen::Vector3d pos = curr_state->pos;
@@ -778,7 +817,7 @@ int SchurVINS::Backward(const svo::FrameBundle::Ptr frame_bundle) {
         //           << "bg: " << bg[0] << ", " << bg[1] << ", " << bg[2];
         // LOG(INFO) << "gravity: " << gravity[0] << ", " << gravity[1] << ", " << gravity[2];
     }
-
+    // 返回有效特征点数量
     return num_valid_feature;
 }
 
@@ -865,12 +904,14 @@ int SchurVINS::RemovePointOutliers() {
     return outlier_points_num;
 }
 
+// 从当前帧中剔除误差较大的外点，保留有效的特征点
 int SchurVINS::RemoveOutliers(const svo::FrameBundle::Ptr frame_bundle) {
     constexpr double MAX_REPROJECT_ERROR = 4.0;
     double total_error = 0;
     const svo::AugStatePtr& state = states_map.rbegin()->second;
 
     int num_valid_feature = 0, num_invalid_feature = 0;
+    // 遍历每个帧并处理每个特征点
     for (const svo::FramePtr& frame : frame_bundle->frames_) {
         // const Eigen::Matrix3d R_i_c = frame->T_imu_cam().getRotationMatrix();
         // const Eigen::Quaterniond q_i_c = frame->T_imu_cam().getEigenQuaternion();
@@ -880,28 +921,40 @@ int SchurVINS::RemoveOutliers(const svo::FrameBundle::Ptr frame_bundle) {
         // const Eigen::Matrix3d R_c_w = frame->T_f_w_.getRotationMatrix();
         // const Eigen::Vector3d t_c_w = frame->T_f_w_.getPosition();
         for (size_t i = 0; i < frame->numFeatures(); ++i) {
+            // 用于获取当前特征点的三维位置（地图点）
             const svo::PointPtr curr_pt = frame->landmark_vec_[i];
+            // 该特征点在图像上的归一化坐标
             const Eigen::Vector3d obs = frame->f_vec_.col(i);
             // const double level_scale = (1 << frame->level_vec_[i]);
+            // 金字塔层级的缩放因子，此处简化了金字塔层级的处理
             const double level_scale = 1;
+            // 检查地图点的状态并计算重投影误差
             if (curr_pt && local_pts.find(curr_pt->id()) != local_pts.end()) {
+                // 如果地图点的状态无效，跳过这个点
                 if (curr_pt->CheckStatus() == false)
                     continue;
 
                 const Eigen::Vector3d Pc = frame->T_f_w_ * curr_pt->pos();
+                // 使用观测值 obs 和重投影点 Pc 的坐标计算残差
+                // 残差计算的过程是将 obs 和 Pc 归一化，并乘以焦距（focal_length）来得到误差
                 const Eigen::Vector2d r
                     = (obs.head<2>() / obs.z() - Pc.head<2>() / Pc.z()) * (focal_length / level_scale);
+                // 统计整个帧的误差
                 total_error += r.norm();
 
                 if (r.norm() > MAX_REPROJECT_ERROR) {
+                    // 认为该特征点是外点，标记为 kOutlier
                     // curr_pt->RemoveLocalObs(state->id, frame->getNFrameIndex());
                     frame->type_vec_[i] = svo::FeatureType::kOutlier;
+                    // 将其种子引用 keyframe 重置，并将地图点 landmark_vec_ 设置为 nullptr
+                    // 表示从当前帧中删除这个特征点
                     frame->seed_ref_vec_[i].keyframe.reset();
                     frame->landmark_vec_[i] = nullptr;  // delete landmark observation
                     num_invalid_feature++;
                     // LOG(ERROR) << "RemoveOutliers residual: " << r.transpose()
                     //            << " camera id: " << frame->getNFrameIndex();
                 } else {
+                    // 如果特征点的误差小于阈值，则认为它是有效特征点
                     num_valid_feature++;
                 }
             }

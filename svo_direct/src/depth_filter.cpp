@@ -86,6 +86,8 @@ void DepthFilter::stopThread()
   }
 }
 
+// 在深度滤波器中为新的关键帧添加新的种子点，并为这些种子点分配深度估计的初始值。
+// 深度滤波器通过多帧观测对这些种子点进行深度估计，从而最终获得三维地图点
 void DepthFilter::addKeyframe(
     const FramePtr& frame,
     const double depth_mean,
@@ -93,20 +95,29 @@ void DepthFilter::addKeyframe(
     const double depth_max)
 {
   // allocate memory for new features.
+  // 为新特征分配内存
   frame->resizeFeatureStorage(
       frame->num_features_ + feature_detector_->grid_.size() +
       (sec_feature_detector_ ?
            sec_feature_detector_->closeness_check_grid_.size() :
            0u));
 
+  // 没有线程的情况（单线程模式）
   if(thread_ == nullptr)
   {
+    // 锁定特征检测器的互斥锁：保护对特征检测器的访问，防止多线程冲突。
     ulock_t lock(feature_detector_mut_);
+    // 初始化种子点：调用 depth_filter_utils::initializeSeeds()，为给定帧中的特征点创建种子，
+    // 使用提供的深度范围以及均值（depth_mean）进行深度初始化。
     depth_filter_utils::initializeSeeds(
           frame, feature_detector_, options_.max_n_seeds_per_frame,
           depth_min, depth_max, depth_mean);
+
+    // 处理额外的地图点（如果启用了额外的地图点选项）
     if (options_.extra_map_points)
     {
+      // 遍历特征点：遍历当前帧中的所有特征点 (frame->numFeatures())，
+      // 如果该特征点不是地图点且不是离群点 (kOutlier)，则将其添加到第二特征检测器的检查网格中
       for (size_t idx = 0; idx < frame->numFeatures(); idx++)
       {
         const FeatureType& type = frame->type_vec_[idx];
@@ -116,6 +127,8 @@ void DepthFilter::addKeyframe(
                 frame->px_vec_.col(static_cast<int>(idx)));
         }
       }
+      // 初始化额外的种子点
+      // 目标是将更多特征点加入深度滤波器，以便丰富地图信息
       depth_filter_utils::initializeSeeds(
             frame, sec_feature_detector_,
             options_.max_n_seeds_per_frame + options_.max_map_seeds_per_frame,
@@ -124,12 +137,17 @@ void DepthFilter::addKeyframe(
   }
   else
   {
+    // 存在线程的情况（多线程模式）
+    // 锁定任务队列：锁定任务队列的互斥锁
     ulock_t lock(jobs_mut_);
 
     // clear all other jobs, this one has priority
+    // 清空任务队列并添加当前任务：清空任务队列，只保留当前关键帧的深度任务，表明当前任务有更高的优先级
     while(!jobs_.empty())
       jobs_.pop();
+    // 将当前任务添加到队列中
     jobs_.push(Job(frame, depth_min, depth_max, depth_mean));
+    // 通知其他线程有新的任务可执行
     jobs_condvar_.notify_all();
   }
 }
@@ -197,30 +215,37 @@ void DepthFilter::updateSeedsLoop()
   }
 }
 
+// 通过当前帧对参考帧中的种子点进行更新
 size_t DepthFilter::updateSeeds(
-    const std::vector<FramePtr>& ref_frames_with_seeds,
+    const std::vector<FramePtr>& ref_frames_with_seeds, // 包含种子点的参考帧列表
     const FramePtr& cur_frame)
 {
   size_t n_success = 0;
+  // 检查是否为单线程模式
   if(thread_ == nullptr)
   {
+    // 遍历所有参考帧 ref_frames_with_seeds
     for(const FramePtr& ref_frame : ref_frames_with_seeds)
     {
+      // 对于每个参考帧，遍历其中所有特征点
       for(size_t i = 0; i < ref_frame->num_features_; ++i)
       {
         const FeatureType& type = ref_frame->type_vec_[i];
         if(isSeed(type))
         {
+          // 对于普通种子点，使用默认的深度收敛阈值
           double cur_thresh = options_.seed_convergence_sigma2_thresh;
           // we use a different threshold for map points to get better accuracy
           if (type == FeatureType::kMapPointSeed ||
               type == FeatureType::kMapPointSeedConverged)
           {
+            // 对于地图点种子 (kMapPointSeed 或 kMapPointSeedConverged)，使用更精确的收敛阈值
             cur_thresh = options_.mappoint_convergence_sigma2_thresh;
           }
           // We get higher precision (10x in the synthetic blender dataset)
           // when we keep updating seeds even though they are converged until
           // the frame handler selects a new keyframe.
+          // 更新种子点深度，传入当前帧、参考帧、特征点索引、匹配器、阈值等参数
           if(depth_filter_utils::updateSeed(
                *cur_frame, *ref_frame, i, *matcher_, cur_thresh, true, false))
           {
@@ -234,18 +259,24 @@ size_t DepthFilter::updateSeeds(
   }
   else
   {
+    // 多线程模式的种子更新
+    // 使用互斥锁锁定任务队列，防止多线程冲突
     ulock_t lock(jobs_mut_);
+    // 遍历参考帧和特征点
     for(const FramePtr& ref_frame : ref_frames_with_seeds)
     {
       for(size_t i = 0; i < ref_frame->num_features_; ++i)
       {
+        // 对于种子点，将更新任务 (Job(cur_frame, ref_frame, i)) 加入到任务队列 jobs_ 中
         if(isSeed(ref_frame->type_vec_[i]))
         {
           jobs_.push(Job(cur_frame, ref_frame, i));
         }
       }
     }
+    // 通知工作线程有新的任务可执行
     jobs_condvar_.notify_all();
+    // 这样做的好处是，将种子点的更新任务分配给后台线程，以减少前端的计算负担，保证实时性
   }
   return n_success;
 }

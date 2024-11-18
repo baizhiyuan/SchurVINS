@@ -154,39 +154,55 @@ Matcher::MatchResult Matcher::findEpipolarMatchDirect(
                                  d_estimate_inv, d_min_inv, d_max_inv, depth);
 }
 
+// 在当前帧和参考帧之间沿着极线搜索匹配特征点
+// 采用直接法（利用像素灰度信息）进行匹配，通过估计的深度在极线上找到最好的匹配点
 Matcher::MatchResult Matcher::findEpipolarMatchDirect(
-    const Frame& ref_frame,
-    const Frame& cur_frame,
-    const Transformation& T_cur_ref,
-    const FeatureWrapper& ref_ftr,
-    const double d_estimate_inv,
+    const Frame& ref_frame,             // 参考帧，用于与当前帧匹配
+    const Frame& cur_frame,             // 当前帧，在其图像中搜索匹配点
+    const Transformation& T_cur_ref,    // 从参考帧到当前帧的位姿变换
+    const FeatureWrapper& ref_ftr,      // 参考帧中特征点的包装器，包含特征点的坐标、类型等信息
+    const double d_estimate_inv,        // 深度估计的倒数
+    // 深度的最小和最大值的倒数，定义了深度范围
     const double d_min_inv,
     const double d_max_inv,
+    // 引用参数，用于输出匹配点的深度值
     double& depth)
 {
-  int zmssd_best = PatchScore::threshold();
+  // 初始化匹配评分阈值, 使用基于灰度差的 PatchScore 来评估匹配质量
+  int zmssd_best = PatchScore::threshold();   // 表示当前最佳匹配的得分，初始为一个阈值，用于后续比较
 
+  // 计算极线的起点和终点
   // Compute start and end of epipolar line in old_kf for match search, on image plane
+  // 计算极线在图像平面的起点 A 和终点 B。极线的起点和终点由特征点的方向向量与深度范围 d_min_inv 和 d_max_inv 共同确定
   const BearingVector A = T_cur_ref.getRotation().rotate(ref_ftr.f) + T_cur_ref.getPosition()*d_min_inv;
   const BearingVector B = T_cur_ref.getRotation().rotate(ref_ftr.f) + T_cur_ref.getPosition()*d_max_inv;
+  // 将三维点 A 和 B 投影到当前帧的图像平面上，得到像素坐标 px_A 和 px_B
   Eigen::Vector2d px_A, px_B;
   cur_frame.cam()->project3(A, &px_A);
   cur_frame.cam()->project3(B, &px_B);
+  // epi_image_ 表示极线在图像平面上的向量
   epi_image_ = px_A - px_B;
 
+  // 计算仿射变换矩阵
   // Compute affine warp matrix
+  // 计算从参考帧到当前帧的仿射变换矩阵 A_cur_ref_，用于将参考帧的特征点在当前帧中进行仿射变换
+  // 使用仿射变换，可以更精确地找到匹配点，特别是在视差较大时
   warp::getWarpMatrixAffine(
       ref_frame.cam_, cur_frame.cam_, ref_ftr.px, ref_ftr.f,
       1.0/std::max(0.000001, d_estimate_inv), T_cur_ref, ref_ftr.level, &A_cur_ref_);
 
   // feature pre-selection
+  // 特征预筛选
   reject_ = false;
   if(isEdgelet(ref_ftr.type) && options_.epi_search_edgelet_filtering)
   {
+    // 如果参考特征点是边缘特征 (isEdgelet) 且启用了边缘特征过滤，则计算边缘梯度方向和极线方向的夹角。
     const Eigen::Vector2d grad_cur = (A_cur_ref_ * ref_ftr.grad).normalized();
     const double cosangle = fabs(grad_cur.dot(epi_image_.normalized()));
     if(cosangle < options_.epi_search_edgelet_max_angle)
     {
+      // 如果梯度方向与极线方向的夹角大于设定的最大角度
+      // 则认为该特征点不适合进行匹配，返回失败状态
       reject_ = true;
       return MatchResult::kFailAngle;
     }
@@ -195,10 +211,13 @@ Matcher::MatchResult Matcher::findEpipolarMatchDirect(
   // prepare for match
   //    - find best search level
   //    - warp the reference patch
+  // 使用仿射变换矩阵 A_cur_ref_ 来选择最佳的搜索金字塔层次 search_level_，以平衡精度与计算量
   search_level_ = warp::getBestSearchLevel(A_cur_ref_, ref_frame.img_pyr_.size()-1);
   // length and direction on SEARCH LEVEL
+  // 根据搜索层次调整极线长度 epi_length_pyramid_，并进行仿射变换，获取参考帧的补丁图像 patch_，用于后续的匹配
   epi_length_pyramid_ = epi_image_.norm() / (1<<search_level_);
   GradientVector epi_dir_image = epi_image_.normalized();
+  // 如果仿射变换失败，则返回 MatchResult::kFailWarp
   if(!warp::warpAffine(A_cur_ref_, ref_frame.img_pyr_[ref_ftr.level], ref_ftr.px,
                        ref_ftr.level, search_level_, kHalfPatchSize+1, patch_with_border_))
     return MatchResult::kFailWarp;
@@ -206,37 +225,48 @@ Matcher::MatchResult Matcher::findEpipolarMatchDirect(
         patch_with_border_, kPatchSize, patch_);
 
   // Case 1: direct search locally if the epipolar line is too short
+  // 局部搜索（极线很短的情况）
   if(epi_length_pyramid_ < 2.0)
   {
+    // 如果极线的长度（在金字塔层次下）小于 2 个像素，认为可以在极线中点附近进行局部搜索
     px_cur_ = (px_A+px_B)/2.0;
+    // 使用 findLocalMatch 在极线中点附近搜索最佳匹配点，如果成功则计算其三维方向向量 f_cur_
     MatchResult res = findLocalMatch(cur_frame, epi_dir_image, search_level_, px_cur_);
     if(res != MatchResult::kSuccess)
       return res;
+    // 最后通过三角化来计算匹配点的深度，返回结果
     cur_frame.cam()->backProject3(px_cur_, &f_cur_);
     f_cur_.normalize();
     return matcher_utils::depthFromTriangulation(T_cur_ref, ref_ftr.f, f_cur_, &depth);
   }
 
   // Case 2: search along the epipolar line for the best match
+  // 沿极线进行匹配搜索, 对于较长的极线，使用 scanEpipolarLine 在极线上逐步搜索匹配点
   PatchScore patch_score(patch_); // precompute for reference patch
+  // 使用 patch_score 来比较参考帧的补丁和当前帧极线上不同位置的图像灰度值，以找到最佳匹配
   BearingVector C = T_cur_ref.getRotation().rotate(ref_ftr.f) + T_cur_ref.getPosition()*d_estimate_inv;
+  // px_cur_ 保存找到的最佳匹配点的像素位置
   scanEpipolarLine(cur_frame, A, B, C, patch_score, search_level_, &px_cur_, &zmssd_best);
 
   // check if the best match is good enough
+  // 检查匹配结果并进行亚像素优化
   if(zmssd_best < PatchScore::threshold())
   {
+    // 如果找到的最佳匹配分数低于预设的阈值（表示匹配质量好），则进一步进行亚像素优化
     if(options_.subpix_refinement)
     {
+      // 对匹配点进行局部精细化，如果成功则计算匹配点的方向向量 f_cur_
       MatchResult res = findLocalMatch(cur_frame, epi_dir_image, search_level_, px_cur_);
       if(res != MatchResult::kSuccess)
         return res;
     }
-
+    // 最后通过三角化得到深度值并返回匹配成功的结果
     cur_frame.cam()->backProject3(px_cur_, &f_cur_);
     f_cur_.normalize();
     return matcher_utils::depthFromTriangulation(T_cur_ref, ref_ftr.f, f_cur_, &depth);
   }
   else
+    // 如果匹配分数不够好
     return MatchResult::kFailScore;
 }
 

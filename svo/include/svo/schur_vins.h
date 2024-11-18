@@ -113,6 +113,9 @@ class SchurVINS {
     double obs_invdev = 1;
     double huberA = 1.5;
     double huberB = huberA * huberA;
+    // int init_start = 0;
+    // int init_num = 500;
+    // bool init_flag = false;
     std::vector<double> chi_square_lut;
 };
 

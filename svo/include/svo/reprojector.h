@@ -73,6 +73,9 @@ struct ReprojectorOptions
 /// point per cell. Thereby, we achieve a homogeneously distributed set of
 /// matched features and at the same time we can save processing time by not
 /// projecting all points.
+/// 将地图上的点投影到图像中并找到相应的特征（角点）。
+/// 我们不会为每个点搜索匹配，而只会为每个单元格搜索一个点。
+/// 因此，我们实现了一组均匀分布的匹配特征，同时我们可以通过不投影所有点来节省处理时间。
 class Reprojector
 {
 public:

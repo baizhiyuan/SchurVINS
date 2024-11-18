@@ -116,6 +116,7 @@ void Map::getOverlapKeyframes(
   for(const auto& kf : keyframes_)
   {
     // check first if Point is visible in the Keyframe, use therefore KeyPoints
+    // 首先检查 Point 是否在关键帧中可见，然后使用 KeyPoints
     for(const auto& keypoint : kf.second->key_pts_)
     {
       if(keypoint.first == -1)
@@ -145,14 +146,21 @@ void Map::getClosestNKeyframesWithOverlap(
 
   size_t N = std::min(num_frames, overlap_kfs.size());
   // Extract closest N frames.
+  // C++17 引入，用于对元素进行部分排序，使得第 N 个元素是整体排序后应在的位置
+  // 这里的 overlap_kfs.begin() + N 是第 N 个位置
+  // 在排序之后，前 N 个元素是与当前帧重叠度最小的（即重叠度从小到大排序）
   std::nth_element(
         overlap_kfs.begin(), overlap_kfs.begin()+N, overlap_kfs.end(),
         [](const std::pair<FramePtr, double>& lhs,
            const std::pair<FramePtr, double>& rhs)
   { return lhs.second < rhs.second; });
+  // 调整 overlap_kfs 的大小为 N，只保留重叠度最小的 N 个关键帧
   overlap_kfs.resize(N);
 
+  // 将找到的关键帧添加到输出容器中
   close_kfs->reserve(num_frames);
+  // std::transform()：将 overlap_kfs 中的帧指针提取出来，并添加到输出容器 close_kfs 中
+  // 这里用 lambda 表达式，只提取 overlap_kfs 中每对 pair 的第一个元素（即关键帧的指针）
   std::transform(overlap_kfs.begin(), overlap_kfs.end(), std::back_inserter(*close_kfs),
                  [](const std::pair<FramePtr, double>& p) { return p.first; });
 }
